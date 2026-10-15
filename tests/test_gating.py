@@ -96,3 +96,11 @@ def test_robot_gating_blocks_joints_in_other_chains():
         gating="chain", probe_counts=probed,
     )
     assert s_chain.status("y", 1) == "ready"             # chain gating lets y go on
+
+
+def test_an_untrusted_skill_is_never_used():
+    # Its policy failed the healthy gate, so its tier is unknown even though the belief is certain.
+    s = make_state({"a": 1.0}, probed=[("a", 0)])
+    s.untrusted = frozenset({("a", 0)})
+    assert s.status("a", 0) == "unknown"
+    assert s.status("b", 0) == "unknown"                 # the joint above it inherits the unknown

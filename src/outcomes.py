@@ -1,55 +1,66 @@
-"""Simulate every probe on every joint under every damage hypothesis, once per run.
+"""Table of predictions for the planner: each joint, tier and damage hypothesis.
 
-This table is the planner's model of the robot. For each probe it gives the predicted readings,
-violations and energy under each hypothesis. The planner uses these for the Bayesian update
-(pass probability) and for choosing probes (risk and energy).
+Three things are kept apart (see docs/stage1-plan.md, section 3.7):
+  model level      the level the assessors predict. The belief uses it.
+  reference level  the level the scripted PD controller reaches, noise-free. Evaluation uses it.
+  damage truth     the true hypothesis, which only the simulator knows.
 """
 from dataclasses import dataclass
 
 from .platform_adapter import usable_tiers
-from .sim import run_probe
-
-
-@dataclass(frozen=True)
-class Prediction:
-    metrics: dict         # noise-free readings
-    violations: frozenset
-    energy_j: float
-    pass_prob: float      # chance the tier passes, noise included. 0 if the probe aborts.
 
 
 @dataclass
 class Table:
-    predictions: dict     # (joint, tier, hypothesis) -> Prediction
-    levels: dict          # joint -> {hypothesis: level}; highest tier passed noise-free, -1 = none
+    predictions: dict       # (joint, tier, hypothesis) -> Prediction
+    levels: dict            # joint -> {hypothesis: model level}, -1 = none
+    reference_levels: dict  # joint -> {hypothesis: reference level}, -1 = none
+    trusted: dict           # (joint, tier) -> bool
+    assessors: dict         # tier name -> assessor, also used for the robot's own runs
 
     def get(self, joint, tier, hypothesis):
         return self.predictions[(joint, tier, hypothesis)]
 
 
-def build_table(platform, tiers, damage):
+def _contiguous_level(passes):
+    """Highest tier index reached with no gap below it. Returns -1 if the first tier fails."""
+    level = -1
+    for index, passed in enumerate(passes):
+        if not passed:
+            break
+        level = index
+    return level
+
+
+def build_table(platform, tiers, damage, assessors, scripted):
     usable = usable_tiers(platform, tiers)
     predictions = {}
     levels = {}
-    for joint in platform.joints:
+    reference = {}
+    trusted = {}
+
+    for j_index, joint in enumerate(platform.joints):
         levels[joint.name] = {}
-        for h in damage.names:
-            level = -1
-            ladder_open = True  # stays True while every tier so far has passed
-            for index, tier in enumerate(usable):
-                result = run_probe(joint, platform.probes[tier.name], damage.faults[h], platform)
-                passed = not result.aborted and tier.passes(result.metrics)
-                predictions[(joint.name, tier.name, h)] = Prediction(
-                    metrics=result.metrics,
-                    violations=frozenset(result.violations),
-                    energy_j=result.energy_j,
-                    pass_prob=0.0 if result.aborted else tier.pass_probability(result.metrics),
-                )
-                # Every tier is simulated (the planner needs all of them). The level only counts
-                # tiers reached without a break in the ladder.
-                if ladder_open and passed:
-                    level = index
+        reference[joint.name] = {}
+        for h_index, h in enumerate(damage.names):
+            fault = damage.faults[h]
+            model_passes = []
+            reference_passes = []
+            for t_index, tier in enumerate(usable):
+                # The reference is the scripted controller, judged on its noise-free readings.
+                ref = scripted.predict(joint, tier, fault)
+                assessor = assessors[tier.name]
+                if assessor is scripted:
+                    pred = ref  # the same computation, so do not run it twice
                 else:
-                    ladder_open = False
-            levels[joint.name][h] = level
-    return Table(predictions=predictions, levels=levels)
+                    pred = assessor.predict(joint, tier, fault, seed_key=(j_index, t_index, h_index))
+                predictions[(joint.name, tier.name, h)] = pred
+                trusted[(joint.name, tier.name)] = pred.trusted
+                model_passes.append(pred.pass_prob >= 0.5)
+                reference_passes.append(
+                    ref.p_any_violation == 0.0 and tier.passes(ref.metrics))
+            levels[joint.name][h] = _contiguous_level(model_passes)
+            reference[joint.name][h] = _contiguous_level(reference_passes)
+
+    return Table(predictions=predictions, levels=levels, reference_levels=reference,
+                 trusted=trusted, assessors=assessors)

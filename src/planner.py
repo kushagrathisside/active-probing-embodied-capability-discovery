@@ -60,9 +60,9 @@ def score(state, joint, ti, table, cfg):
     info = expected_information_gain(
         belief, {h: p.pass_prob for h, p in preds.items()},
         state.levels[joint], cfg.likelihood_floor)
-    risk = sum(b * sum(cfg.risk_weights.get(v, 0.0) for v in preds[h].violations)
+    risk = sum(b * sum(cfg.risk_weights.get(v, 0.0) * p for v, p in preds[h].violation_prob.items())
                for h, b in belief.items())
-    p_violation = sum(b for h, b in belief.items() if preds[h].violations)
+    p_violation = sum(b * preds[h].p_any_violation for h, b in belief.items())
     energy = sum(b * preds[h].energy_j for h, b in belief.items()) / cfg.energy_scale_j
     utility = info - cfg.risk_weight * risk - cfg.energy_weight * energy
     return Scored(joint, ti, info, risk, p_violation, energy, utility)

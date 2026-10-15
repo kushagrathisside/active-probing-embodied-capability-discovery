@@ -1,7 +1,8 @@
 import random
 
 from src.gating import State
-from src.outcomes import Prediction, Table
+from src.assessors import Prediction
+from src.outcomes import Table
 from src.planner import PlannerConfig, choose
 from src.tiers import Tier
 
@@ -14,7 +15,11 @@ CFG = PlannerConfig(
 
 
 def pred(pass_prob, violations=(), energy=0.0):
-    return Prediction(metrics={}, violations=frozenset(violations), energy_j=energy, pass_prob=pass_prob)
+    """A prediction where every listed violation happens with certainty."""
+    violation_prob = {v: 1.0 for v in violations}
+    return Prediction(pass_prob=pass_prob, violation_prob=violation_prob,
+                      p_any_violation=1.0 if violations else 0.0, energy_j=energy,
+                      metrics={}, margin=0.0)
 
 
 def make(joints, belief, predictions, levels=None):
@@ -29,6 +34,9 @@ def make(joints, belief, predictions, levels=None):
     table = Table(
         predictions={(j, "T0", h): p for (j, h), p in predictions.items()},
         levels=state.levels,
+        reference_levels=state.levels,
+        trusted={},
+        assessors={},
     )
     return state, table
 

@@ -1,23 +1,27 @@
-"""Compare a physical state report with the hidden truth.
+"""Compare a physical state report with the hidden truth. Evaluation only.
 
-Evaluation only. The planner and the report never see the true damage.
-The truth is the joint's own capability: the level it would reach if probed alone, noise-free.
+The planner and the report never see the true damage. Three checks, kept separate:
+  hypothesis_accuracy  is the most likely damage state the true one? (the damage question)
+  accuracy / overclaim the reported level against the reference level (the scripted controller's)
+  coverage             how many joints got a determined level at all
 """
 
 
 def score_episode(report, episode):
     rows = []
+    hypothesis_hits = 0
     for part in report["parts"]:
-        truth = episode.state.levels[part["joint"]][episode.true_states[part["joint"]]]
-        rows.append((part["level"], part["determined"], truth))
+        joint = part["joint"]
+        truth = episode.true_states[joint]
+        reference = episode.reference_levels[joint][truth]
+        rows.append((part["level"], part["determined"], reference))
+        hypothesis_hits += part["most_likely_state"] == truth
     n = len(rows)
     return {
-        # Share of joints whose level was actually determined by probing.
         "coverage": sum(det for _, det, _ in rows) / n,
-        # Share of joints with the right level and a determined level.
-        "accuracy": sum(det and lvl == truth for lvl, det, truth in rows) / n,
-        # Share of joints reported above their true level: claiming capability that is not there.
-        "overclaim": sum(lvl > truth for lvl, _, truth in rows) / n,
+        "accuracy": sum(det and lvl == ref for lvl, det, ref in rows) / n,
+        "overclaim": sum(lvl > ref for lvl, _, ref in rows) / n,
+        "hypothesis_accuracy": hypothesis_hits / n,
         "probes": report["probes_used"],
         "aborts": report["aborted_probes"],
         "energy_j": report["energy_j"],

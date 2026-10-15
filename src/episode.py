@@ -1,13 +1,14 @@
 """One probing episode: a simulated robot with hidden damage, probed by one method.
 
 Random streams are kept separate, so every method sees the same damage for the same seed:
-  seed       -> the true damage
-  seed + 1   -> sensor noise
-  seed + 2   -> the random baseline's choices
+  seed       -> the true damage (python random)
+  seed + 1   -> the robot's own rollouts: plant randomisation and noise (numpy)
+  seed + 2   -> the random baseline's choices (python random)
 """
-import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+import numpy as np
 
 from .belief import update
 from .damage import sample_fault_name
@@ -31,40 +32,45 @@ class ProbeRecord:
 class Episode:
     state: State
     log: list
-    true_states: dict     # joint -> hypothesis actually present. For evaluation only.
+    true_states: dict         # joint -> hypothesis actually present. For evaluation only.
+    reference_levels: dict    # joint -> {hypothesis: reference level}. For evaluation only.
     method: str
     seed: int
     budget: int
 
 
 class SimulatedRobot:
-    """Hidden damage plus sensor noise. The planner only sees the results of its probes."""
+    """Hidden damage, run through the assessors. The planner only sees the results of its probes."""
 
-    def __init__(self, tiers, damage, table, damage_rng, noise_rng, joint_names):
+    def __init__(self, platform, tiers, assessors, damage, damage_rng, rollout_rng, joint_names):
+        self.platform = platform
         self.tiers = tiers
-        self.table = table
-        self.noise_rng = noise_rng
+        self.assessors = assessors
+        self.rollout_rng = rollout_rng
         self.true_states = {name: sample_fault_name(damage, damage_rng) for name in joint_names}
+        self.faults = damage.faults
 
-    def run(self, joint, ti):
+    def run(self, joint_name, ti):
         tier = self.tiers[ti]
-        pred = self.table.get(joint, tier.name, self.true_states[joint])
-        if pred.violations:
-            # The probe was stopped by a safety limit. That is a fail.
-            return False, pred
-        readings = dict(pred.metrics)
-        for c in tier.checks:
-            if c.noise_sigma > 0.0 and not math.isnan(readings[c.metric]):
-                readings[c.metric] += self.noise_rng.gauss(0.0, c.noise_sigma)
-        return tier.passes(readings), pred
+        fault = self.faults[self.true_states[joint_name]]
+        assessor = self.assessors[tier.name]
+        return assessor.execute(self.platform.joint(joint_name), tier, fault, self.rollout_rng)
 
 
 def run_episode(platform, tiers, damage, table, method, cfg, seed):
     usable = usable_tiers(platform, tiers)
     names = tuple(j.name for j in platform.joints)
-    damage_rng = random.Random(seed)
+    tier_index = {t.name: i for i, t in enumerate(usable)}
+    untrusted = frozenset(
+        (joint, tier_index[tier])
+        for (joint, tier), trusted in table.trusted.items()
+        if not trusted and tier in tier_index
+    )
+    robot = SimulatedRobot(platform, usable, table.assessors, damage,
+                           damage_rng=random.Random(seed),
+                           rollout_rng=np.random.default_rng(seed + 1),
+                           joint_names=names)
     policy_rng = random.Random(seed + 2)
-    robot = SimulatedRobot(usable, damage, table, damage_rng, random.Random(seed + 1), names)
 
     state = State(
         joint_names=names,
@@ -75,6 +81,7 @@ def run_episode(platform, tiers, damage, table, method, cfg, seed):
         gating=cfg.gating,
         confidence=cfg.pass_confidence,
         max_repeats=cfg.max_repeats,
+        untrusted=untrusted,
     )
 
     log = []
@@ -85,17 +92,18 @@ def run_episode(platform, tiers, damage, table, method, cfg, seed):
         if choice is None:
             break
         joint, ti = choice
-        passed, pred = robot.run(joint, ti)
+        execution = robot.run(joint, ti)
         state.probe_counts[(joint, ti)] = state.probe_counts.get((joint, ti), 0) + 1
 
         tier = usable[ti]
         pass_prob = {h: table.get(joint, tier.name, h).pass_prob for h in state.beliefs[joint]}
-        state.beliefs[joint] = update(state.beliefs[joint], pass_prob, passed, cfg.likelihood_floor)
+        state.beliefs[joint] = update(state.beliefs[joint], pass_prob, execution.passed, cfg.likelihood_floor)
         log.append(ProbeRecord(
-            step=step, joint=joint, tier=tier.name, passed=passed,
-            aborted=bool(pred.violations), violations=tuple(sorted(pred.violations)),
-            energy_j=pred.energy_j,
+            step=step, joint=joint, tier=tier.name, passed=execution.passed,
+            aborted=bool(execution.violations), violations=tuple(sorted(execution.violations)),
+            energy_j=execution.energy_j,
         ))
 
     return Episode(state=state, log=log, true_states=robot.true_states,
+                   reference_levels=table.reference_levels,
                    method=method, seed=seed, budget=cfg.budget)

@@ -39,7 +39,10 @@ changing one does not need a code change.
 
 - **Probes are gentle by design.** Sizes: 0.5 deg step (T0), 5 deg move over 1 s (T1), 20 deg
   out and back over 4 s (T2), 3 s hold (T3). A probe aborts if the controller asks for more
-  than 50% of the joint's torque limit (overload), or if the joint leaves its range.
+  than its overload budget, or if the joint leaves its range. The budget is 50% of the joint's
+  rated torque for T0 to T2. The hold (T3) uses **70%**, because at 50% a nominal shoulder aborts
+  most healthy runs under +/-10% randomisation. 70% is still 30% below rated torque.
+  **Confirm**: this is a safety setting.
 - **An aborted probe is a fail** for that tier. The abort is also counted as a real violation
   in the report.
 
@@ -117,3 +120,44 @@ changing one does not need a code change.
 - **Accuracy** = share of joints whose level is determined and correct. **Coverage** = share of
   joints whose level is determined. **Overclaim** = share of joints reported above their true
   level, which is the dangerous error.
+
+## Learned skills (stage 1)
+
+The full plan and the robotics review are in [`stage1-plan.md`](stage1-plan.md). The choices made while building it:
+
+- **A learned policy is two gain multipliers per joint and skill**, found by evolution strategies.
+  Torque = kp_mult * kp * error - kd_mult * kd * speed. No feedforward, no gravity bias, no fault
+  input. This is deliberately small: it keeps the policy from compensating for the damage. Richer
+  policies are stage 2.
+- **Stiffness may only be softened, never raised above nominal** (kp_mult in [0.5, 1.0]). The first
+  version let the stiffness multiplier rise to about 4. A stiffer policy then hid a broken link
+  (T2 passed 98% of the time, where the scripted controller fails). Damping is free in [0.5, 4].
+- **Linear reward on the tier's primary metric**, not squared. The squared form had no gradient
+  near zero error, so T1 gains drifted to their bounds under the effort penalty.
+- **Eight randomised instances per candidate, not four.** Aborts are rare events, so four instances
+  gave noisy estimates and the shoulder hold settled in a poor region.
+- **Healthy gate with a Wilson lower bound** (95%, at least 0.85, 100 episodes). A policy has to
+  pass about 91% of healthy randomised runs to be trusted. A policy that is untrusted gives
+  `unknown`, not a damage conclusion.
+- **Randomisation +/-10%** on tau_max, inertia, gravity and stiffness, for training, the gate, the
+  model table and the robot's own runs. Each pass probability is therefore a distribution over
+  plants, not one number.
+- **Two noise sources, kept separate**: input noise inside the control loop, and reading noise on
+  the metrics (from `tiers.yaml`).
+- **Three levels, kept apart**: the model level (what the belief uses), the reference level (the
+  scripted PD controller, noise-free), and the damage truth (the true hypothesis). Evaluation
+  reports hypothesis accuracy, level accuracy against the reference, and overclaim.
+
+### What the stage-1 run shows
+
+- All 18 learned skills pass the healthy gate (`results/policies/arm6/`).
+- Healthy joints pass each learned skill about 98% of the time, which is the Laplace-smoothed
+  rate for 50 rollouts.
+- **The scripted reference cannot separate a healthy joint from a weak motor** on the base,
+  elbow or wrists. Weak motors only show under load, and only the shoulder carries enough.
+- **Learned T1 is softer than the reference** on the elbow and wrists. A broken link fails learned
+  T1, where the nominal controller passes. The policy gap is reported, not hidden.
+- **On the base and wrist 3, a broken link is missed** (the learned policy passes it), because those
+  joints carry little load and the signal is weak.
+- **The weak-motor signal varies with the randomised torque limit**, so the shoulder's weak motor is
+  detected in about 73% of runs, not all of them.

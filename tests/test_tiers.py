@@ -51,3 +51,12 @@ def test_loaded_tiers_are_T0_to_T3_in_order():
     tiers = load_tiers()
     assert [t.name for t in tiers] == ["T0", "T1", "T2", "T3"]
     assert all(len(t.checks) >= 1 for t in tiers)
+
+
+def test_vector_pass_and_margin_agree_with_the_scalar_checks():
+    import numpy as np
+    tier = Tier("T9", "test", (Check("a", "min", 1.0, 0.0), Check("b", "max", 2.0, 0.0)))
+    metrics = {"a": np.array([1.5, 0.5, np.nan]), "b": np.array([1.0, 1.0, 1.0])}
+    assert list(tier.passes_array(metrics)) == [True, False, False]
+    assert tier.margin_array(metrics)[0] == 0.5          # tightest check: min(0.5, 1.0)
+    assert np.isnan(tier.margin_array(metrics)[2])       # NaN reading stays NaN

@@ -17,11 +17,13 @@ from src.config import REPO_ROOT
 from src.damage import load_damage
 from src.episode import run_episode
 from src.evaluate import score_episode
-from src.outcomes import build_table
+from src.pipeline import build_model
 from src.planner import load_planner_config
 from src.platform_adapter import load_platform
+from src.policies import PolicyStore
 from src.report import build_report
 from src.tiers import load_tiers
+from src.training import load_training_config
 
 METRICS = ("coverage", "accuracy", "overclaim", "probes", "aborts", "energy_j")
 
@@ -34,16 +36,20 @@ def main():
                         help="planner risk weights to run (RQ2)")
     parser.add_argument("--gating", choices=["chain", "robot"], default=None,
                         help="override configs/planner.yaml (RQ3)")
+    parser.add_argument("--assessment", choices=["learned", "scripted"], default="learned")
     parser.add_argument("--out", default=os.path.join(REPO_ROOT, "results", "comparison.csv"))
     args = parser.parse_args()
 
     platform = load_platform()
     tiers = load_tiers()
     damage = load_damage()
+    settings = load_training_config()
     base_cfg = load_planner_config()
     if args.gating:
         base_cfg = dataclasses.replace(base_cfg, gating=args.gating)
-    table = build_table(platform, tiers, damage)
+    store = PolicyStore(os.path.join(REPO_ROOT, "results", "policies", platform.name))
+    table = build_model(platform, tiers, damage, store=store, settings=settings,
+                        force_scripted=args.assessment == "scripted")
 
     methods = [(f"planner(risk={w:g})", "planner", dataclasses.replace(base_cfg, risk_weight=w))
                for w in args.risk_weights]

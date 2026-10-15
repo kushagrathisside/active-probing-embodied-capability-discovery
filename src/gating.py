@@ -8,7 +8,8 @@ Status of a joint at a tier:
   pass / fail  concluded from the belief after at least one probe of that tier
                (see pass_confidence in configs/planner.yaml)
   blocked      a prerequisite failed, so the tier is never tested
-  unknown      the repeat limit ran out, or a prerequisite is unknown
+  unknown      the repeat limit ran out, a prerequisite is unknown, or the learned policy
+               for this tier failed the healthy gate
   ready        allowed now, not yet concluded
   wait         a prerequisite has not passed yet
 """
@@ -28,8 +29,12 @@ class State:
     confidence: float = 0.95
     max_repeats: int = 2
     probe_counts: dict = field(default_factory=dict)  # (joint, tier index) -> probes run
+    untrusted: frozenset = frozenset()                 # (joint, tier index) with no trusted assessor
 
     def status(self, joint, ti):
+        # A skill whose learned policy failed the healthy gate is not used at all.
+        if (joint, ti) in self.untrusted:
+            return "unknown"
         # A tier is only concluded from a probe of that tier. The belief can be confident
         # without one (e.g. T0 evidence rules out a hypothesis that T2 would catch), and a
         # physical report must not call a tier passed on that basis alone.

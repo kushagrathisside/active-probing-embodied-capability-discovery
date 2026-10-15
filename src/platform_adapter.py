@@ -26,6 +26,7 @@ class Platform:
     joints: tuple         # every joint, in config order
     chains: dict          # chain name -> joint names, from the base outwards
     probes: dict          # tier name -> probe spec, with a "kind" key
+    assessment: dict      # tier name -> "scripted" or "learned"
     probe_torque_limit_fraction: float
     torque_constant_nm_per_a: float
     heat_coeff: float
@@ -73,6 +74,7 @@ def load_platform(path=None):
         joints=tuple(joints),
         chains=chains,
         probes=raw["probes"],
+        assessment=dict(raw.get("assessment", {})),
         probe_torque_limit_fraction=float(raw["safety"]["probe_torque_limit_fraction"]),
         torque_constant_nm_per_a=float(raw["safety"]["torque_constant_nm_per_a"]),
         heat_coeff=float(raw["safety"]["heat_coeff"]),

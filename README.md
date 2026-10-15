@@ -42,22 +42,26 @@ The planned workflow is:
 
 ## Current Implementation
 
-The first version runs in simulation on a 6-DOF arm. Each part is a joint, and each joint is checked through the tiers T0 to T3.
+The current version runs in simulation on a 6-DOF arm. Each part is a joint, and each joint is assessed through the tiers T0 to T3.
 
 - **Tier logic** (`src/tiers.py`): each tier is a set of checks with thresholds from `configs/tiers.yaml`.
-- **Platform adapter** (`src/platform_adapter.py`, `configs/platform_arm6.yaml`): joints, chains, limits, probes and safety settings. A new robot is a new YAML file.
-- **Simulator** (`src/sim.py`): a single-joint model. It runs every probe under every damage hypothesis to get the planner's predictions, and it serves as the ground truth.
+- **Platform adapter** (`src/platform_adapter.py`, `configs/platform_arm6.yaml`): joints, chains, limits, skills and which assessor judges each tier. A new robot is a new YAML file.
+- **Physics** (`src/physics.py`): one batched single-joint model. Scripted probes and learned policies run on it.
+- **Skills** (`src/tasks.py`): the reference motion and readings for each tier's task.
+- **Policies** (`src/policies.py`): a stage-1 policy is two gain multipliers per joint and skill.
+- **Training** (`src/training.py`): evolution strategies on randomised healthy joints, plus a healthy gate.
+- **Assessors** (`src/assessors.py`): the scripted reference and the learned policies, both with one interface.
 - **Damage hypotheses** (`src/damage.py`, `configs/damage.yaml`): healthy, locked, weak motor, missing sensor, broken link.
-- **Belief and planner** (`src/belief.py`, `src/planner.py`): a Bayesian belief per joint. Probes are chosen by expected information gain minus weighted risk and energy, with a safety veto.
+- **Belief and planner** (`src/belief.py`, `src/planner.py`): a Bayesian belief per joint. Skills are ordered by expected information gain minus weighted risk and energy, with a safety veto.
 - **Gating** (`src/gating.py`): a tier is tested only after the tiers below it pass, within the same chain. The whole-robot baseline is also available (`gating: robot`).
-- **Report** (`src/report.py`): the physical state report, as Markdown and JSON. It is built only from probe results.
-- **Evaluation** (`src/evaluate.py`): compares the report with the simulated truth. The planner never sees the truth.
+- **Report** (`src/report.py`): the physical state report, as Markdown and JSON.
+- **Evaluation** (`src/evaluate.py`): hypothesis accuracy, level against the reference, and overclaim. The planner never sees the truth.
 
-Design choices and their defaults are in [`docs/design-decisions.md`](docs/design-decisions.md). Items marked **Confirm** are open.
+The plan and the robotics review are in [`docs/stage1-plan.md`](docs/stage1-plan.md). Design choices and their defaults are in [`docs/design-decisions.md`](docs/design-decisions.md). Items marked **Confirm** are open.
 
 ### Running
 
-Requires Python 3.11 or newer with `venv`. Install the dependencies in a virtual environment:
+Requires Python 3.11 or newer with `venv`:
 
 ```bash
 python3 -m venv .venv
@@ -70,25 +74,33 @@ Run the tests:
 .venv/bin/python -m pytest
 ```
 
-Run one episode and write its report to `results/`:
+The steps, in order:
 
 ```bash
+# 1. Teach each skill to a healthy joint (about 20 seconds with 4 workers)
+.venv/bin/python -m experiments.train_policies --workers 4
+
+# 2. Run each policy on each damage case and check it against the reference
+.venv/bin/python -m experiments.assess_policies
+
+# 3. One episode, with its physical state report
 .venv/bin/python -m experiments.run_episode --method planner --seed 1
+
+# 4. Compare the methods over many seeds
+.venv/bin/python -m experiments.compare_methods --seeds 100 --budgets 12 24 40
 ```
 
-Compare the methods over many seeds. `--risk-weights` is the RQ2 sweep, and `--gating robot` is the RQ3 baseline:
-
-```bash
-.venv/bin/python -m experiments.compare_methods --seeds 100 --budgets 6 12 24 40
-```
-
-Results go to `results/`, which is git-ignored except for `.gitkeep`.
+Add `--assessment scripted` to steps 3 and 4 to use the reference controller only. Results go to `results/`, which is git-ignored except for `.gitkeep`.
 
 ### Not yet implemented
 
-- T4 (whole-body posture) and any legged platform. These are the next step, to test that the tier logic transfers.
+- A whole-arm environment, with the joints interacting. This is the next step.
+- A richer policy class (an MLP), and PPO.
+- Friction, backlash, latency, and a weak motor modelled by its current.
+- A stiffness probe at several poses, for a robot with gravity compensation.
+- T4 (whole-body posture) and any legged platform.
 - A shared-damage belief (RQ3, second half).
-- A probe that reads the sensor without moving the joint, which would separate a locked joint from a missing sensor.
+- A probe that reads the sensor without moving the joint, to separate a locked joint from a missing sensor.
 
 ## Project Structure
 
@@ -100,22 +112,26 @@ g11-active-probing/
 ├── pytest.ini
 ├── .gitignore
 │
-├── configs/                  tiers, platform adapter, damage hypotheses, planner settings
+├── configs/                  tiers, platform, damage hypotheses, planner, training
 │   ├── tiers.yaml
 │   ├── platform_arm6.yaml
 │   ├── damage.yaml
-│   └── planner.yaml
+│   ├── planner.yaml
+│   └── training.yaml
 │
 ├── src/                      core implementation (module list in src/__init__.py)
 │
 ├── experiments/
+│   ├── train_policies.py     train and gate every learned skill
+│   ├── assess_policies.py    signature, identifiability and agreement with the reference
 │   ├── run_episode.py        one episode and its physical state report
 │   └── compare_methods.py    methods compared over seeds and budgets
 │
-├── tests/                    tiers, simulator, gating, belief, planner, episodes
+├── tests/                    tiers, physics, probes, policies, training, assessors, planner, episodes
 │
 ├── results/                  experiment outputs (git-ignored)
 │
 └── docs/
+    ├── stage1-plan.md        plan for learned skills, with the robotics review
     └── design-decisions.md   open choices and their defaults
 ```
