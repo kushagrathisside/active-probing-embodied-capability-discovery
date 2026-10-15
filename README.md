@@ -40,26 +40,82 @@ The planned workflow is:
 9. Repeat until sufficient information about the robot's capabilities has been obtained.
 10. Evaluate the resulting capability-discovery performance.
 
+## Current Implementation
+
+The first version runs in simulation on a 6-DOF arm. Each part is a joint, and each joint is checked through the tiers T0 to T3.
+
+- **Tier logic** (`src/tiers.py`): each tier is a set of checks with thresholds from `configs/tiers.yaml`.
+- **Platform adapter** (`src/platform_adapter.py`, `configs/platform_arm6.yaml`): joints, chains, limits, probes and safety settings. A new robot is a new YAML file.
+- **Simulator** (`src/sim.py`): a single-joint model. It runs every probe under every damage hypothesis to get the planner's predictions, and it serves as the ground truth.
+- **Damage hypotheses** (`src/damage.py`, `configs/damage.yaml`): healthy, locked, weak motor, missing sensor, broken link.
+- **Belief and planner** (`src/belief.py`, `src/planner.py`): a Bayesian belief per joint. Probes are chosen by expected information gain minus weighted risk and energy, with a safety veto.
+- **Gating** (`src/gating.py`): a tier is tested only after the tiers below it pass, within the same chain. The whole-robot baseline is also available (`gating: robot`).
+- **Report** (`src/report.py`): the physical state report, as Markdown and JSON. It is built only from probe results.
+- **Evaluation** (`src/evaluate.py`): compares the report with the simulated truth. The planner never sees the truth.
+
+Design choices and their defaults are in [`docs/design-decisions.md`](docs/design-decisions.md). Items marked **Confirm** are open.
+
+### Running
+
+Requires Python 3.11 or newer with `venv`. Install the dependencies in a virtual environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Run the tests:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Run one episode and write its report to `results/`:
+
+```bash
+.venv/bin/python -m experiments.run_episode --method planner --seed 1
+```
+
+Compare the methods over many seeds. `--risk-weights` is the RQ2 sweep, and `--gating robot` is the RQ3 baseline:
+
+```bash
+.venv/bin/python -m experiments.compare_methods --seeds 100 --budgets 6 12 24 40
+```
+
+Results go to `results/`, which is git-ignored except for `.gitkeep`.
+
+### Not yet implemented
+
+- T4 (whole-body posture) and any legged platform. These are the next step, to test that the tier logic transfers.
+- A shared-damage belief (RQ3, second half).
+- A probe that reads the sensor without moving the joint, which would separate a locked joint from a missing sensor.
+
 ## Project Structure
 
 ```text
-active-probing-embodied-capability-discovery/
+g11-active-probing/
 │
 ├── README.md
 ├── requirements.txt
+├── pytest.ini
 ├── .gitignore
 │
-├── src/
-│   └── Core implementation
+├── configs/                  tiers, platform adapter, damage hypotheses, planner settings
+│   ├── tiers.yaml
+│   ├── platform_arm6.yaml
+│   ├── damage.yaml
+│   └── planner.yaml
+│
+├── src/                      core implementation (module list in src/__init__.py)
 │
 ├── experiments/
-│   └── Experimental scripts
+│   ├── run_episode.py        one episode and its physical state report
+│   └── compare_methods.py    methods compared over seeds and budgets
 │
-├── configs/
-│   └── Experiment configurations
+├── tests/                    tiers, simulator, gating, belief, planner, episodes
 │
-├── results/
-│   └── Experimental results
+├── results/                  experiment outputs (git-ignored)
 │
 └── docs/
-    └── Project documentation and literature notes
+    └── design-decisions.md   open choices and their defaults
+```
