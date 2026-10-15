@@ -140,7 +140,10 @@ def train_skill(joint, tier, skill, platform, settings, seed):
         theta = np.clip(theta + settings.learning_rate * step, low, high)
         history.append(round(float(reward.mean()), 4))
 
-    gate = gate_policy(joint, tier, skill, theta[0], theta[1], platform, settings, seed + 1)
+    # The gate uses its own seed stream, offset by the same job index as the training seed,
+    # so gate and training streams never overlap (configs/training.yaml, seeds).
+    gate_seed = settings.seeds["gate"] + (seed - settings.seeds["training"])
+    gate = gate_policy(joint, tier, skill, theta[0], theta[1], platform, settings, gate_seed)
     return PolicyRecord(
         joint=joint.name,
         tier=tier.name,
