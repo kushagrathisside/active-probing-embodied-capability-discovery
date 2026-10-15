@@ -1,163 +1,131 @@
 # Design decisions
 
-Each choice below has a default that the code uses now. Items marked **Confirm** are open:
-change the default if the team or the TA decides otherwise. Thresholds live in `configs/`, so
-changing one does not need a code change.
+This is the decision log for stage 1. Each decision has an ID, the value the code uses, the alternatives considered, the reason, and a status:
 
-## Platform and simulator
+- **Implemented**: built as described.
+- **Confirm**: the default is in the code, and the team or the TA must confirm or change it. These are also listed at the end.
+- **Limitation**: a known gap, stated so that the report can say so.
 
-- **Platform: simulated 6-DOF arm on a fixed base, one kinematic chain.** Parts are joints.
-  Quadruped and humanoid adapters come later, to show the tier logic transfers. **Confirm** the
-  order of platforms.
-- **Simulator: our own single-joint model in pure Python** (`src/sim.py`), with no MuJoCo or
-  PyBullet dependency. Why: it is short enough to read, needs nothing to install, and runs
-  fast enough to simulate every probe under every hypothesis. What it leaves out: joints do not
-  interact, there is no contact, and gravity acts on a joint only through its own load value.
-  A physics engine can replace `run_probe` behind the same interface.
-- **Probes are simulated one joint at a time.** Gating means a joint is probed only after the
-  joints below it pass, so the others can be treated as healthy during the probe.
+Numbers are the values in `configs/`. Change a value there, not in code. Where a value affects the trained policies, the policies must be regenerated (`experiments/train_policies.py`).
 
-## Tiers
+## 1. Scope and platform
 
-- **T0 to T3 for the arm. T4 is not implemented.** Whole-body posture needs legs, so it has no
-  meaning for an arm. It belongs with the quadruped or humanoid.
-- **Load bearing is expressed through `gravity_nm`.** Only the T3 hold applies gravity. T0 to
-  T2 run unloaded, as the brief says ("without bearing weight"). The base has zero gravity, so
-  its T3 test passes trivially. It still runs, so the base's level is always tested to the top.
-- **Thresholds are hand-picked starting values, not measured** (`configs/tiers.yaml`):
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D1 | Platform | 6-DOF serial arm on a fixed base, one chain | Quadruped, humanoid, two-arm | The brief asks to start with an arm. An arm has no legs to balance, so the first version isolates the tier logic. | Implemented |
+| D2 | Parts | Each joint is one part | Each link, each actuator-and-sensor pair | Joints are where the damage hypotheses act. | Implemented |
+| D3 | Tiers on the arm | T0 to T3. T4 not implemented | Include a stand-up test | T4 is whole-body posture and needs legs. | Implemented |
+| D4 | Simulator | Own batched single-joint model in numpy | MuJoCo, PyBullet, Gymnasium | Short enough to read, no heavy dependency, fast enough to run every probe under every hypothesis. | Implemented |
+| D5 | Joint coupling | None: one joint at a time | Whole-arm dynamics | Keeps the model small. It is the main structural limit (A9 in [robotics-limitations.md](robotics-limitations.md)). | Limitation |
+| D6 | Time step | 2 ms (500 Hz) | 1 kHz, 10 ms | 500 Hz is plausible for a joint servo loop. Learned policies would run slower in practice. | Implemented |
 
-  | Tier | Check | Pass when |
-  |---|---|---|
-  | T0 | sensor valid, response to a 0.5 deg step, peak current | valid; response ratio ≥ 0.5; current ≤ 6 A |
-  | T1 | final error after a 5 deg move | ≤ 1.0 deg |
-  | T2 | RMS error on a 20 deg out-and-back path | ≤ 2.0 deg |
-  | T3 | sag under gravity, peak torque / torque limit | sag ≤ 1.5 deg; torque ≤ 0.8 |
+## 2. Tiers and thresholds
 
-  **Confirm** these numbers with the TA. They are the pass threshold decision the team has to make.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D7 | T0 checks | Sensor valid; response ≥ 0.5 of a 0.5° step; peak current ≤ 6 A | Current from a model | Response shows the actuator moves; current catches a stall. | Implemented |
+| D8 | T1 check | Final error ≤ 1.0° after a 5° move in 1 s, held to 2 s | Peak error, settling time | Final error is what a user cares about. | Implemented |
+| D9 | T2 check | RMS error ≤ 2.0° on a 20° out-and-back path over 4 s | Max error | RMS averages over the path, so one bad sample does not fail the path. | Implemented |
+| D10 | T3 checks | Sag ≤ 1.5° over the last 1 s of a 3 s hold; peak torque ≤ 0.8 of rated | Torque only | Sag shows stiffness loss; torque shows excess demand. | Implemented |
+| D11 | Threshold values | 0.5, 6 A, 1.0°, 2.0°, 1.5°, 0.8 | Measured from hardware | Hand-picked. There is no hardware. | **Confirm** |
 
-## Probes
+## 3. Probes, budgets and safety
 
-- **Probes are gentle by design.** Sizes: 0.5 deg step (T0), 5 deg move over 1 s (T1), 20 deg
-  out and back over 4 s (T2), 3 s hold (T3). A probe aborts if the controller asks for more
-  than its overload budget, or if the joint leaves its range. The budget is 50% of the joint's
-  rated torque for T0 to T2. The hold (T3) uses **70%**, because at 50% a nominal shoulder aborts
-  most healthy runs under +/-10% randomisation. 70% is still 30% below rated torque.
-  **Confirm**: this is a safety setting.
-- **An aborted probe is a fail** for that tier. The abort is also counted as a real violation
-  in the report.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D12 | Probe sizes | 0.5° step; 5° move; 20° path; 3 s hold | Larger motions | Gentle by design (the brief says probes start gentle). | Implemented |
+| D13 | Overload budget, T0 to T2 | 0.5 × rated torque | 0.4, 0.6 | Half of rated torque is gentle; a nominal joint's demand is far below it. | Implemented |
+| D14 | Overload budget, T3 | **0.7 × rated torque** | 0.5 (the original) | At 0.5 the healthy shoulder hold passes 16% of randomised runs (see [model.md](model.md), section 9). At 0.7, it passes 100%, and the weak shoulder still fails 91%. | **Confirm** |
+| D15 | Abort | Any violation ends the run and counts as a fail | Penalise and continue | An aborted run has no reliable readings, so a fail is the honest result. | Implemented |
+| D16 | Joint-limit check | After each step, against `limits_deg` | Before each step | Checks the state the joint actually reached. | Implemented |
+| D17 | Probe cost | Energy proxy, `∫(abs(τ·qd) + 0.002·τ²) dt` | Measured current | A proxy, not a measurement. | Limitation |
 
-## Gating
+## 4. Damage hypotheses and prior
 
-- **"Below" means closer to the base in the same chain** (`configs/platform_arm6.yaml`). The
-  rule is that a tier of a joint is tested only when the same tier of each joint below it has
-  passed. **Confirm** this reading against the brief. The alternative (any tier) would allow
-  more probes.
-- **Consequence for one chain.** A failed shoulder blocks the elbow and wrists, even though
-  their own probes are not affected by the shoulder's fault. With one chain, chain gating has
-  the same effect as a barrier on everything above the failure. This is the case the brief
-  describes, and it is the reason multi-chain platforms are needed to test RQ3.
-- **Whole-robot baseline** (`gating: robot`): a tier is tested on any joint only after every
-  other joint has passed the tier below. Used for RQ3.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D18 | Hypotheses | healthy, locked, weak motor, missing sensor, broken link | More faults (encoder offset, friction, backlash) | The brief's four plus healthy. Encoder offset and friction are listed as future work. | Implemented |
+| D19 | Locked | Stall torque `tau_max` when asked to move | Current proportional to command | Stall torque is what a motor draws when blocked. | Implemented |
+| D20 | Weak motor | Torque capped at 40% | Lower torque constant (more current) | Simplest form. The current check therefore understates it (A6). | Limitation |
+| D21 | Broken link | Stiffness scale 0.1 | 0.2 (tried first) | At 0.2, the wrists and base passed every tier, so they could not be identified. 0.1 separates them on T2. | Implemented |
+| D22 | Prior | 0.8 healthy, 0.05 for each fault | Uniform; a fault-rate parameter | Most joints are healthy. The belief starts here, and the truth is drawn from it. | **Confirm** |
+| D23 | Belief | Independent per joint | Shared-damage belief across joints | Simplest correct model. Shared damage is RQ3's second half. | Limitation |
+| D24 | Likelihood | Per-check Gaussian pass probability, multiplied across checks; floored at 0.01 | Exact noise model per metric | A model-error floor, so one wrong prediction cannot rule a hypothesis out. | Implemented |
 
-## Damage hypotheses and belief
+## 5. Gating and the evidence rule
 
-- **Hypotheses** (`configs/damage.yaml`): healthy; locked (the motor cannot move the joint); weak
-  motor (40% of torque); missing sensor (no encoder reading, so the joint is never moved);
-  broken link (position stiffness at 10%).
-- **Prior**: 0.8 healthy, 0.05 for each fault. It is both the starting belief and the way the
-  simulated ground truth is drawn. **Confirm** the fault rate.
-- **Belief is per joint, independent.** A shared-damage belief (RQ3, second half) is not
-  implemented yet.
-- **Likelihood.** Each reading has Gaussian sensor noise. A tier passes when every check
-  passes, so its pass probability is the product of the per-check probabilities. Every
-  pass/fail probability is floored at 0.01, so a single wrong prediction cannot rule a
-  hypothesis out for good.
-- **Limitation: locked and missing sensor look the same** (both fail T0, both are level -1). The
-  report shows the split, for example 0.48 / 0.48 on the shoulder, but probing cannot separate
-  them yet. A check that reads the sensor without moving the joint would separate them.
-- **Limitation: weak motor on lightly loaded joints is not detectable.** The elbow's 12 N*m
-  load is below its 16 N*m reduced torque, so a weak elbow reaches level 3. This is correct
-  physics, not a bug. It means the weak-motor hypothesis only shows up under load.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D25 | Meaning of "below" | Closer to the base, in the same chain | Any tier, or the physical lower end of a chain | The brief says "the parts below it". The base supports everything above it. | **Confirm** |
+| D26 | Gating rule (chain) | A tier of a joint is tested only when the same tier of each proximal joint has passed | Any tier of each proximal joint | Avoids confounded tests: a distal test on a faulty proximal joint is uninformative. | Implemented |
+| D27 | Gating rule (robot) | A tier is tested on any joint only when every other joint has passed the tier below | — | The whole-robot baseline for RQ3. | Implemented |
+| D28 | Evidence rule | A tier is concluded only after at least one probe of that tier | Belief alone | Without it, a T0 pass gave a 0.96 belief that T2 passed, with the true state a broken link. | Implemented |
+| D29 | Conclusion thresholds | Pass when P ≥ 0.95; fail when P ≤ 0.05 | 0.9, 0.99 | Standard two-sided threshold. | Implemented |
+| D30 | Repeat limit | After 2 probes without a conclusion, the tier is `unknown` | 3, 5 | Two probes confirm a deterministic fail under the floor. | Implemented |
+| D31 | Ordering versus skipping | Utility orders probes but never skips an allowed one | Stop when no probe is worth its cost | A tier can only be concluded by probing it. Skipping would leave an untested tier `unknown` for no reason. | Implemented |
 
-## Evidence and conclusions
+## 6. Planner
 
-- **A tier is concluded only by a probe of that tier.** The belief can make a tier
-  "ready" or "unknown", but it cannot mark it passed or failed on its own. Without this rule the
-  simulator showed a false pass: after a T0 pass, the shoulder's belief reached 0.96 for T2 with
-  no T2 probe, while the true state was a broken link that T2 would catch.
-- **Pass** when the belief that the joint reaches the tier is ≥ 0.95. **Fail** when it is ≤ 0.05.
-  After 2 probes of one tier with no conclusion, the tier is **unknown**.
-- **Level** is the highest tier passed, -1 if none. A level is **determined** when the top tier
-  passed, or the next tier failed. A "blocked" next tier means it was never tested, so the level
-  is a lower bound.
-- **Passive observation** is a baseline with zero probes. It is a floor, not a real observer.
-  **Confirm**: what free telemetry (normal motion, current, sensor validity) the arm produces.
-  A passive baseline built on that telemetry would be a fairer comparison.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D32 | Information | Mutual information between capability level and pass/fail outcome, in bits | Information about the hypothesis | The report shows the level, so the planner should maximise information about the level. | Implemented |
+| D33 | Risk | Expected weighted violation probability, weights fall 1.0, overload 0.5, joint limit 0.5 | Expected violation magnitude | Violations are discrete events in this model. | **Confirm** (weights) |
+| D34 | Risk cap (all methods) | A probe is never run if its chance of any violation exceeds 0.2 | No veto; cap at 0.1 | A hard limit applies to every method, so baselines are as safe as the planner. | Implemented |
+| D35 | Energy | Weight 0.5, scale 10 J | Weight 0 | Energy is a secondary cost. Its weight does not change the order here. | **Confirm** |
+| D36 | Budget | 40 probes per episode | Per-tier budgets | A session limit. The planner usually stops before it, when no allowed probe is left. | Implemented |
+| D37 | Baselines | random, fixed (tier order, then base outwards), passive (no probes) | A stronger baseline | Each baseline shares gating, budget and veto with the planner, so only the choice differs. | Implemented |
+| D38 | Passive baseline | Zero probes: a floor | Free telemetry from normal operation | Passive observation has no telemetry model yet. | **Confirm** |
 
-## Planner
+## 7. Learned skills
 
-- **Information gain** is the mutual information, in bits, between the capability level and the
-  pass/fail outcome of a probe. The level is what the report shows. The cause is not targeted.
-- **Risk** is the expected weighted violation score under the belief. Weights: fall 1.0,
-  overload 0.5, joint limit 0.5 (`configs/planner.yaml`). **Confirm** the weights (the risk
-  measure is an open choice in the brief).
-- **Safety veto (all methods).** A probe is never run if its chance of causing any violation,
-  under the current belief, exceeds 0.2.
-- **Energy** is a proxy: the integral of |torque x velocity| plus 0.002 x torque squared, in J.
-  It is not a measured quantity.
-- **Utility** = information gain - risk weight x risk - energy weight x energy / 10 J. It sets
-  the order of probes. It never skips an allowed probe, because a tier cannot be concluded
-  without one. The planner stops when no allowed, safe probe is left, or when the budget
-  (40 probes) runs out.
-- **Baselines** share the gating, the budget, the veto and the belief update. They differ only
-  in which allowed probe they run next: random (uniform), or fixed (tier order, then joints
-  from the base outwards).
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D39 | Policy form | Two gain multipliers, linear feedback on error and speed | MLP, feedforward, gravity bias | Gain-only policies cannot hide damage behind a feedforward (see [learning.md](learning.md), section 1). | Implemented |
+| D40 | Learner | Evolution strategies | PPO, a grid search | Needs no gradient, and a few lines of numpy. A grid search is still useful as a check (not yet built). | Implemented |
+| D41 | Stiffness bounds | [0.5, 1.0] | [0.25, 4.0] (tried first) | At up to 4, a stiffer policy hid a broken link on T2, which passed 98% of the time. | Implemented |
+| D42 | Damping bounds | [0.5, 4.0] | [0.25, 4.0] | Damping cannot hide a stiffness loss, so its bounds are wider. | Implemented |
+| D43 | Reward | Linear in the primary metric over its threshold, minus 0.05 × effort, minus 10 on abort | Squared metric | Squared metric had no gradient near zero error and drove gains to their bounds. | Implemented |
+| D44 | Training | Population 32 (antithetic), 8 instances, 40 generations, σ 0.1, learning rate 0.1 | 4 instances | 4 instances gave noisy estimates when aborts are rare. | Implemented |
+| D45 | Randomisation | ±10% on τ_max, I, g and stiffness | ±5%, ±20% | Gives a range of joints for training, and the gate tests robustness to it. | **Confirm** |
+| D46 | Input noise | Angle σ 0.05°, speed σ 0.5°/s | No noise | The controller must not depend on perfect sensing. Values are assumed, not measured (A4). | **Confirm** |
+| D47 | Healthy gate | Wilson 95% lower bound ≥ 0.85 on 100 episodes; needs 92 successes | Raw rate ≥ 0.9 | The lower bound accounts for sampling error. A raw 0.9 from 100 runs is trusted only 32% of the time. | **Confirm** |
+| D48 | Untrusted skill | `unknown` everywhere it is used | Use it with a warning | An untrusted skill's evidence is not reliable, so it is not used. | Implemented |
+| D49 | Model-table pass probability | Laplace-smoothed, (passes + 1)/(50 + 2) | Raw rate | Keeps 0 and 1 out of the belief. | Implemented |
+| D50 | T0 | Scripted, not learned | Learned T0 | T0 is a diagnostic and gates the learned skills. Learning it would make the gate depend on the thing it gates. | **Confirm** |
 
-## Evaluation
+## 8. Evaluation and reporting
 
-- **Truth** is each joint's own capability: the level it reaches when probed alone with no
-  sensor noise. It does not depend on gating.
-- **Accuracy** = share of joints whose level is determined and correct. **Coverage** = share of
-  joints whose level is determined. **Overclaim** = share of joints reported above their true
-  level, which is the dangerous error.
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D51 | Damage truth | The true hypothesis, sampled from the prior | — | The question is which damage is present. | Implemented |
+| D52 | Reference level | The scripted controller's level, noise-free | The best achievable by any controller | The reference is what a simple controller does. A stronger search would give a higher reference. | **Confirm** |
+| D53 | Model level | Highest tier in a contiguous ladder with predicted pass probability ≥ 0.5 | Expected level | The belief uses it, so it must say what the assessor predicts. | Implemented |
+| D54 | Level determined | Top tier passed, or the next tier failed. A "blocked" next tier is a lower bound | Always report a level | A blocked tier was never tested. Calling its level determined would overclaim. | Implemented |
+| D55 | Metrics | Coverage, accuracy, overclaim, hypothesis accuracy | Only accuracy | Overclaim is the dangerous error, so it is reported separately. | Implemented |
 
-## Learned skills (stage 1)
+## 9. Seeds and reproducibility
 
-The full plan and the robotics review are in [`stage1-plan.md`](stage1-plan.md). The choices made while building it:
+| ID | Decision | Value | Alternatives | Reason | Status |
+|---|---|---|---|---|---|
+| D56 | Seed streams | Training 1000 + index; gate 2000 + index; table 3000 with SeedSequence per entry; truth seed + 1; damage seed; policy seed + 2 | One global seed | Independent streams, so no two uses share numbers. A gate-stream overlap was found and fixed (commit `70ab4e4`). | Implemented |
+| D57 | Index for training seeds | Counts every (joint, tier) slot in order, including T0 | Only learned slots | Keeps seeds stable if a tier's assessor changes. | Implemented |
 
-- **A learned policy is two gain multipliers per joint and skill**, found by evolution strategies.
-  Torque = kp_mult * kp * error - kd_mult * kd * speed. No feedforward, no gravity bias, no fault
-  input. This is deliberately small: it keeps the policy from compensating for the damage. Richer
-  policies are stage 2.
-- **Stiffness may only be softened, never raised above nominal** (kp_mult in [0.5, 1.0]). The first
-  version let the stiffness multiplier rise to about 4. A stiffer policy then hid a broken link
-  (T2 passed 98% of the time, where the scripted controller fails). Damping is free in [0.5, 4].
-- **Linear reward on the tier's primary metric**, not squared. The squared form had no gradient
-  near zero error, so T1 gains drifted to their bounds under the effort penalty.
-- **Eight randomised instances per candidate, not four.** Aborts are rare events, so four instances
-  gave noisy estimates and the shoulder hold settled in a poor region.
-- **Healthy gate with a Wilson lower bound** (95%, at least 0.85, 100 episodes). A policy has to
-  pass about 91% of healthy randomised runs to be trusted. A policy that is untrusted gives
-  `unknown`, not a damage conclusion.
-- **Randomisation +/-10%** on tau_max, inertia, gravity and stiffness, for training, the gate, the
-  model table and the robot's own runs. Each pass probability is therefore a distribution over
-  plants, not one number.
-- **Two noise sources, kept separate**: input noise inside the control loop, and reading noise on
-  the metrics (from `tiers.yaml`).
-- **Three levels, kept apart**: the model level (what the belief uses), the reference level (the
-  scripted PD controller, noise-free), and the damage truth (the true hypothesis). Evaluation
-  reports hypothesis accuracy, level accuracy against the reference, and overclaim.
+## 10. Items to confirm
 
-### What the stage-1 run shows
+These are the decisions the TA or team must confirm. Each has a default in the code, so the work runs without them.
 
-- All 18 learned skills pass the healthy gate (`results/policies/arm6/`).
-- Healthy joints pass each learned skill about 98% of the time, which is the Laplace-smoothed
-  rate for 50 rollouts.
-- **The scripted reference cannot separate a healthy joint from a weak motor** on the base,
-  elbow or wrists. Weak motors only show under load, and only the shoulder carries enough.
-- **Learned T1 is softer than the reference** on the elbow and wrists. A broken link fails learned
-  T1, where the nominal controller passes. The policy gap is reported, not hidden.
-- **On the base and wrist 3, a broken link is missed** (the learned policy passes it), because those
-  joints carry little load and the signal is weak.
-- **The weak-motor signal varies with the randomised torque limit**, so the shoulder's weak motor is
-  detected in about 73% of runs, not all of them.
+| Item | Decision ID | Default | Question |
+|---|---|---|---|
+| Pass thresholds | D11 | 0.5, 6 A, 1.0°, 2.0°, 1.5°, 0.8 | Are these the right limits for the robot the team chooses? |
+| Hold budget | D14 | 0.7 × rated torque | Is 70% of rated torque acceptable for a loaded hold on the real robot? |
+| Meaning of "below" | D25 | Closer to the base | Does the brief mean this, or any tier of any proximal joint? |
+| Prior and fault rate | D22 | 0.8 / 0.05 each | What fault rate should the belief assume? |
+| Risk weights | D33 | 1.0 / 0.5 / 0.5 | Which violations matter most? |
+| Energy weight | D35 | 0.5 | Is energy a secondary cost, or should it decide the order? |
+| Passive telemetry | D38 | None (floor) | What free data does normal operation give? |
+| Randomisation | D45 | ±10% | Is ±10% a fair spread, or should it match measured tolerances? |
+| Input noise | D46 | 0.05°, 0.5°/s | Can the team measure real encoder noise? |
+| Healthy gate | D47 | 92 of 100 | Is 0.85 the right confidence bound? |
+| T0 learned or scripted | D50 | Scripted | Should T0 ever be learned? |
+| Reference controller | D52 | Scripted PD | Should the reference be the best achievable controller instead? |
+| Gravity compensation | Section 3 of [robotics-limitations.md](robotics-limitations.md) | No compensation | Does the target robot compensate for gravity? If so, the hold probe must change. |

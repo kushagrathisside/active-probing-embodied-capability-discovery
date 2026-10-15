@@ -1,211 +1,129 @@
-# Stage 1 plan: learned skills on one joint at a time
+# Stage 1 plan, as built
 
-Status: **implemented and run.** Results: `results/assessment_arm6.md`, `results/comparison_learned.csv`.
+This document is the stage-1 plan, updated to match what was built. Each section of the original plan is listed with its status. Where the build differs from the plan, the deviation and its reason are recorded. The robotics review is kept, with the decision made on each point.
 
-## 1. Goal, in plain words
+## 1. Goal
 
-1. Simulate a damaged joint.
-2. Train a small policy with reinforcement learning (RL) for each skill (T1 move, T2 path, T3 hold) on a healthy joint.
-3. Run that policy on the damaged joint and watch how it does.
-4. From the pattern of successes and failures, infer which damage is present, and how close each skill is to failing.
+Simulate a damaged joint, train a small policy with reinforcement learning for each skill (T1 move, T2 path, T3 hold) on healthy joints, run each policy on the damaged joint, and infer the damage and the highest tier the joint can still do from how the policy performs.
 
-T0 (sensor and response check) stays scripted. It is a diagnostic, not a skill. It also gates everything else: a joint that fails T0 is never run on a learned skill.
+T0 (sensor and response check) stays scripted, because it is a diagnostic and it gates the learned skills.
 
-Honesty note for students: a stage-1 policy is two gains per joint and skill, found by RL. That is deliberately small. It keeps the policy from compensating for the damage we want to see. Richer policies are stage 2.
+## 2. Status of each plan item
 
-## 2. What stays the same
+| Plan section | Item | Status | Where |
+|---|---|---|---|
+| 3.1 | One batched physics model | Done | `src/physics.py` |
+| 3.2 | Control law: pure feedback, no feedforward | Done, with tighter bounds (section 3) | `src/policies.py` |
+| 3.3 | Stiffness fault scales only the position term | Done | `src/physics.py` |
+| 3.4 | Training by evolution strategies, randomised healthy joints | Done, with changes (section 3) | `src/training.py` |
+| 3.5 | Healthy gate with Wilson lower bound | Done. Threshold corrected to 92 of 100 (section 3) | `src/training.py` |
+| 3.6 | Two assessors, one interface | Done | `src/assessors.py` |
+| 3.6 | Model table: 50 rollouts, Laplace pass probability | Done | `src/assessors.py` |
+| 3.6 | Truth execution under the true damage, fresh seed | Done | `src/episode.py` |
+| 3.6 | Separate seed ranges | Done, after a fix (section 3) | `src/training.py`, `configs/training.yaml` |
+| 3.6 | Margin to the threshold as the "direction" | Done, reported in the assessment | `experiments/assess_policies.py` |
+| 3.7 | Model, reference and truth kept apart | Done | `src/outcomes.py`, `src/evaluate.py` |
+| 3.8 | Conclusions from probes only | Done | `src/gating.py` |
+| 3.9 | Horizontal scaling: independent jobs | Done for training (`--workers`). Table building is serial. | `experiments/train_policies.py` |
+| 3.9 | Vertical scaling: interfaces at each layer | Done | [architecture.md](architecture.md), section 8 |
+| 3.9 | No hard-coded numbers | Done, with three exceptions in code (see section 3) | `configs/` |
+| 3.9 | Reproducibility: saved policy records | Done | `results/policies/arm6/*.json` |
+| 3.10 | Layering with no upward imports | Done | [architecture.md](architecture.md), section 2 |
+| 3.11 | Tests, items 1 to 4, 6 to 10 | Done | [testing.md](testing.md) |
+| 3.11 | Test 5: ES matches a grid search | **Not done** | Planned, not built. |
+| 3.11 | Test 7: a learned policy passes the gate on one joint and tier | Partly: the assessor test covers T1 with fast settings, not the gate on the real settings | `tests/test_assessors.py` |
+| 3.12 | Acceptance for the experiment | Done (section 5) | `results/assessment_arm6.md` |
+| 4 | Code changes table | Done, with additions (section 4) | — |
+| 5 | Plain steps for students | Done | [README.md](../README.md) |
 
-Tier thresholds (`configs/tiers.yaml`), the Bayesian belief, chain gating, the planner and the report keep their meaning. The new layer only changes where the evidence comes from: a policy rollout instead of a scripted probe.
+## 3. Deviations from the plan
 
-A policy and a scripted probe run the same skill and are judged by the same tier checks on the same metric names.
+Each deviation was made because a measured result required it, or because the plan was wrong about a number. The reason is given.
 
-## 3. Design
+| Plan said | Built | Reason |
+|---|---|---|
+| Stiffness and damping multipliers clamped to [0.25, 4] | Stiffness [0.5, 1.0], damping [0.5, 4.0] | A stiffer policy hid a broken link on T2 (98% pass where the reference fails). See [learning.md](learning.md), section 1. |
+| Population 32, 4 instances per candidate | Population 32, **8 instances** | With 4, aborts were too rare to estimate, and the shoulder hold settled at kp ≈ 2.9 with 12 to 15% aborts. |
+| Reward: squared (metric / threshold)² | **Linear** metric / threshold | The squared form had no gradient near zero, and T1 gains drifted to their bounds under the effort term. |
+| Gate needs about 91 of 100 successes | **92 of 100** | Computed from the Wilson bound: 91 gives 0.838, 92 gives 0.850. |
+| "A policy truly at 0.9 passes about half the time" | **32%** | Computed exactly: `P(lower bound ≥ 0.85 given p = 0.90, n = 100) = 0.321`. |
+| Hold budget not specified (50% in the code) | **70% for T3** | At 50%, the healthy shoulder hold passed 16% of randomised runs. Recorded as decision D14, for confirmation. |
+| Skills use a single overload budget | Budget is **per skill** (`budget_fraction` in `platform_arm6.yaml`) | Needed for the hold budget. Keeps the budget explicit in the config. |
+| Gate uses a separate seed stream | Gate seed was **training seed + 1**, which overlapped the next job | Found in review and fixed (commit `70ab4e4`). The trained policies and their gate results did not change. |
+| Test 5: ES matches a grid search on the two-gain problem | **Not built** | Deferred. The determinism test is in place. Recorded in [testing.md](testing.md). |
+| Reward per step | **Reward per run**: the primary metric over the run (final error, RMS or sag), plus the effort term, minus the abort penalty on abort | The metric is a property of the whole run, not of each step. |
+| (not in plan) | Stiffness multiplier clamped to nominal | Added after the broken-link result. It is the most important change: without it, the learned policies show a broken link as healthy on T2. |
 
-### 3.1 One physics model, batched
+## 4. Changes to the code table
 
-`src/physics.py` is the only joint model. It runs a batch of joints as numpy arrays. One joint is a batch of size 1. Training scores a whole population of candidate policies in one pass.
+The plan's table listed the changes to make. These were built as planned, with these additions:
 
-Control rate: the servo runs at 500 Hz (2 ms). That is plausible for a joint servo loop. It is not plausible for a high-level policy. This is a stated limit (section 6).
-
-### 3.2 Control law: pure feedback, no feedforward
-
-The demanded torque is:
-
-    torque = kp_mult * kp * (ref - q)  -  kd_mult * kd * qd
-
-- `kp`, `kd` are the joint's nominal PD gains from the platform config.
-- The learned parameters are the two multipliers `kp_mult`, `kd_mult`, clamped to [0.25, 4].
-- There is **no** reference-velocity term, **no** gravity bias and **no** fault input.
-
-The scripted PD controller is this same law with both multipliers equal to 1. So the scripted reference and the policy share one code path.
-
-Why no feedforward: a feedforward term hides damage. A reference-velocity term or a gravity bias carries the load, so a loss of stiffness no longer shows.
-
-### 3.3 Stiffness fault
-
-A stiffness fault scales only the position-feedback term: `demand = s * stiffness_term + damping_term`. That matches a weaker position loop.
-
-### 3.4 Training (RL by evolution strategies)
-
-`src/training.py`, evolution strategies (ES) over the two multipliers:
-- Antithetic sampling, population 32, 4 randomised instances per candidate, 40 generations.
-- Randomisation: tau_max, inertia, gravity and stiffness, each within ±10%. The policy is trained on a range of healthy joints, not one.
-- Input noise on the policy's own sensing: 0.05 deg on angle, 0.5 deg/s on speed.
-- Reward per run: minus (primary metric / threshold)², where the primary metric is the tier's first check (final error, RMS error or sag). The reward is in units of the tier's own pass limit. Minus an effort term (mean of (demand / budget)²). Minus a large penalty if the run aborts.
-- Rank-based fitness, as in standard ES.
-
-Why ES: no heavy dependency, the update is a few lines of numpy, and each line can be explained to students. Two parameters are a small problem, so ES converges reliably. A test compares ES with a grid search on the same problem.
-
-### 3.5 Quality gate on each trained policy
-
-Each policy is run on 100 held-out randomised healthy joints.
-- Gate: the Wilson 95% lower bound on the success rate must be at least 0.85. With 100 episodes, a policy needs about 91% observed success to pass. A policy that is truly at 0.9 passes only about half the time, so the lower bound is used, not the raw rate.
-- Trusted: passes the gate. Untrusted skills give `unknown` in the report. No damage conclusion is drawn from them.
-
-### 3.6 Assessment
-
-Two assessors return the same `Prediction` and `Execution` shapes:
-- `ScriptedAssessor`: T0 and the reference probes. Deterministic. Its noise-free readings are the reference.
-- `LearnedAssessor`: T1 to T3 policies.
-
-For each (joint, skill, damage hypothesis):
-- **Model table**: 50 rollouts. Each rollout draws a randomised healthy-or-damaged plant, with input noise and reading noise. Pass probability is (passes + 1) / (50 + 2). Violation probability is the rate of each violation type.
-- **Truth execution**: one rollout under the true damage, with a fresh seed. This is the robot's probe result.
-
-Two noise sources, kept separate:
-- *Input noise* sits inside the control loop (what the policy sees).
-- *Reading noise* sits on the metrics (what the tier check sees), as in `configs/tiers.yaml`.
-Pass probabilities from learned rollouts include both. The Gaussian likelihood in the scripted assessor uses reading noise only.
-
-Seeds come from `numpy.random.SeedSequence` with a key per (joint, tier, hypothesis), so every stream is independent and reproducible. Training, gate, table and truth use separate base seeds.
-
-Each assessment gives, per skill and hypothesis: success rate, the mean margin to the pass threshold (positive is inside the limit), and violation rates. The margin is the "direction" the team asked for: how far a skill is from failing.
-
-### 3.7 Level: model, reference and truth
-
-Three things are kept apart:
-- **Model level**: highest tier in a contiguous ladder whose predicted pass probability is at least 0.5. The belief uses this.
-- **Reference level**: the scripted controller's level, noise-free. It is the capability label for the hypothesis.
-- **Damage truth**: the true hypothesis, from the simulator.
-
-Evaluation reports:
-1. Hypothesis identification: is the most likely hypothesis the true one? This is the damage question.
-2. Level vs reference: is the robot's level right?
-3. Policy gap: where the learned policy and the scripted controller disagree. That gap is the cost of learning.
-
-### 3.8 Conclusions come from probes only
-
-A tier is passed or failed only after a probe of that tier. Without this rule the belief produced a false pass in an earlier test. This rule still holds.
-
-### 3.9 Scalability
-
-- **Horizontal**: each (joint, skill) is one independent job. Training and table building run in parallel with `--workers`. More joints, robots or seeds just add jobs.
-- **Vertical**: each layer has one interface.
-  - Physics: a chain or whole-arm model replaces `physics.py`, behind the same `simulate` call.
-  - Policy: `LinearFeedback` now. An MLP with the same `torques` method later.
-  - Assessor: scripted or learned, chosen per tier in `platform_arm6.yaml`.
-  - Platform: a new robot is a new YAML file.
-- **No hard-coded numbers**: thresholds, gains, seeds and counts are in YAML.
-- **Reproducibility**: each policy is saved as JSON with its settings, seed, gate result and training curve.
-
-### 3.10 Layering
-
-    physics  ->  tasks  ->  runner  ->  assessors  ->  training  ->  pipeline / outcomes  ->  planner / episode / evaluate
-
-Lower layers never import higher ones.
-
-### 3.11 Tests
-
-1. Batched physics: a batch of one and a batch of several give the same trajectories.
-2. Scripted probes keep their known numbers: healthy sag is gravity / kp; weak shoulder aborts on overload; locked fails T0; missing sensor never moves.
-3. Zero error and zero speed give zero torque, so the policy has no gravity bias (the "cannot compensate" test).
-4. Policy save and load round trip.
-5. ES is deterministic for a seed and matches a grid search to within a stated tolerance on the two-gain problem.
-6. The healthy gate computes the Wilson lower bound correctly.
-7. A learned policy passes the healthy gate on one joint and tier.
-8. Learned assessment on a missing sensor never moves the joint.
-9. An untrusted skill gives `unknown` in gating, not `pass` or `fail`.
-10. Planner and episode tests still pass, with the new prediction format.
-
-### 3.12 Acceptance for the experiment
-
-- Each trained skill is trusted, or is reported as untrusted.
-- Signature table: one row per (joint, skill), one column per hypothesis, showing success rate and margin.
-- Agreement: model level vs reference level, per joint and hypothesis. Reported, not forced.
-- Identifiability: for each joint, the hypothesis pairs whose signatures never differ by 0.5 or more on any skill. Those pairs are listed as not separable with these skills.
-- Identifiability is checked first on the scripted controller, before any learned policy is used.
-
-## 4. What changes in the code
-
-| Area | Change |
+| Added | Reason |
 |---|---|
-| `src/sim.py` | Removed. Replaced by `physics.py` (batched), `tasks.py` (skills), `runner.py` (run one skill), `policies.py` (control law and storage). |
-| `src/assessors.py` (new) | `ScriptedAssessor`, `LearnedAssessor`, shared `Prediction` and `Execution`. |
-| `src/training.py` (new) | ES trainer, healthy gate, Wilson bound. |
-| `src/pipeline.py` (new) | Wires assessors from the platform config and the policy store. |
-| `src/outcomes.py` | Builds model table from assessors, reference levels from the scripted controller, and trust flags. |
-| `src/planner.py` | `Prediction` has violation probabilities. Risk uses them. |
-| `src/gating.py` | Untrusted skills give `unknown`. |
-| `src/episode.py` | Truth is an assessor's execution under the true damage. |
-| `src/evaluate.py` | Hypothesis identification, level vs reference, policy gap. |
-| `src/tiers.py` | Vector pass and margin functions. |
-| `configs/training.yaml` (new) | ES, randomisation, noise, gate, table size, seeds, identifiability gap. |
-| `configs/platform_arm6.yaml` | `assessment:` section, which assessor each tier uses. |
-| `experiments/train_policies.py` (new) | Trains every learned (joint, skill) in parallel and gates it. |
-| `experiments/assess_policies.py` (new) | Signature table, agreement, identifiability. |
-| `experiments/run_episode.py`, `compare_methods.py` | Use the pipeline. |
-| `requirements.txt` | Adds numpy. |
+| `src/tasks.py` (separated from the old `sim.py`) | Reference motions and readings are shared by probes and policies. |
+| `src/runner.py` | One place that runs a skill on a batch and adds reading noise. |
+| `experiments/assess_policies.py` | The acceptance checks: signatures, agreement and identifiability. |
+| Per-skill budget | Needed for the hold budget. |
+| `tests/test_physics.py`, `test_policies.py`, `test_training.py`, `test_assessors.py`, `test_probes.py` | Replace the old `test_sim.py`. |
 
-## 5. Plain-language steps for students
+`src/sim.py` was removed. Its physics is in `src/physics.py`, and its probes are in `src/tasks.py` and `src/runner.py`.
 
-1. `train_policies`: teach each skill to a healthy joint, by trial and error.
-2. Check the healthy gate: a policy has to work on a healthy joint before it is trusted.
-3. `assess_policies`: run each trusted policy on each damage case.
-4. Read the signature table: which skill fails under which damage, and how close the others are to failing.
-5. Compare with the reference controller: where does the learned policy fall short?
+## 5. Acceptance (section 3.12 of the original plan)
 
-## 6. Robotics review: decisions
+| Criterion | Result | Met |
+|---|---|---|
+| Each trained skill is trusted, or reported as untrusted | 18 of 18 trusted. Each passed 100 of 100 healthy gate runs. | Yes |
+| Signature table: one row per (joint, skill), one column per hypothesis | Produced: 30 rows of pass probability and margin | Yes |
+| Agreement between model and reference level, reported not forced | 25 of 30 pairs agree. Five disagreements, all broken links, reported in [assessment.md](assessment.md), section 3 | Yes (reported) |
+| Identifiability: pairs not separable on any skill, listed | Scripted: 5 of 60 pairs. Learned: 17 of 60 pairs. Listed in [assessment.md](assessment.md), section 4 | Yes |
+| Identifiability checked first on the scripted controller | Yes. `assess_policies.py` runs it first. | Yes |
+| Runtime: all 18 policies train in a few minutes with parallel workers | 19 s wall with 4 workers | Yes |
 
-A robotics review (a Haiku subagent acting as a hardware researcher) was run on the first draft. Each point was checked against the code before deciding.
+## 6. Robotics review and decisions
+
+A subagent reviewed the first draft of this plan as a robotics researcher. The review's points and the decision on each are recorded here, as they were made. The current state of each limitation is in [robotics-limitations.md](robotics-limitations.md), section 7.
 
 | Point | Decision |
 |---|---|
-| Locked joint "gets an overload abort on T3" | **Corrected.** At home a locked joint has zero demand, so it holds with no sag and passes T3 if run. It never reaches T3, because T0 fails and gates it. The ladder gives level -1. |
-| Policy "no feedforward" but had a reference-velocity term | **Accepted.** Policy is pure feedback on error and speed. Scripted PD is now the same law, so the PD-equivalence test is exact. |
-| Reward units | **Accepted.** Reward is (metric / threshold)². |
-| Truth = PD level is controller performance, not damage | **Accepted.** Damage truth is the true hypothesis. Reference level is kept separately, as the capability label. |
-| Budget vs clip (weak motors saturate between 0.4 and 0.5 tau_max) | **Kept by design.** A weak motor saturates before the overload limit. Documented. |
-| T3 measures kp × gravity; gravity compensation would hide stiffness loss | **Accepted as a stated limit.** These tests assume an uncompensated joint, which is the stage-1 controller. A compensated robot needs a stiffness probe at several poses. Listed as a hardware item. |
-| gravity_nm is one number at one hold pose | **Accepted as a stated limit.** Multi-pose is stage 2. |
-| Friction is missing | **Accepted.** Robustness run in stage 1b. Not in the first physics. |
-| No latency; velocity from a differenced encoder | **Accepted as a limit.** Stage 1 adds simulated noise to speed. A filtered velocity estimate is a hardware requirement. |
-| Weak motor is a hard clip; a demagnetised motor has lower Kt and more current per Nm | **Accepted as a limit.** The current check understates a weak motor. Recorded as a future hypothesis. |
-| Abort must mean drive disable and brake, not a torque cut (a shoulder drops under gravity) | **Accepted as a hardware precondition.** Stage 1 is simulation only. |
-| Sign-flipped or offset encoder can turn the loop into positive feedback | **Accepted as a hardware precondition.** A low-torque direction check comes before any learned run on hardware. Not modelled in stage 1. |
-| "Penalised" over-budget requests are not a limit | **Accepted.** Gains are clamped to [0.25, 4]. Torque is capped by the plant. Overload is a hard abort, not a penalty. |
-| Weak elbow and wrists are not separable | **Accepted as a finding.** The identifiability check will list them. |
-| Locked vs a sluggish policy (both fail T1 or T2) | **Accepted as a known confusion.** The healthy gate and margins reduce it. |
-| Noise counted twice | **Clarified.** Reading noise and input noise are separate sources (section 3.6). |
-| ES is overkill for two parameters; use a grid | **Partly rejected.** ES stays, because RL is the goal. A grid search is a test of whether ES finds the optimum. |
-| No test that the policy cannot see the fault | **Accepted.** Test 3 in 3.11. |
-| No test for locked on learned gains | **Accepted.** Locked is gated by T0. A test checks that no learned run happens on a locked joint. |
-| Gate of 20 rollouts is too noisy | **Accepted.** 100 gate episodes, Wilson lower bound. |
-| Model table randomised or not? | **Decided:** randomised, so each pass probability is a distribution over plants, not one number. |
-| Identifiability threshold so "not forced" can fail | **Accepted.** A pair is separable if some skill differs by at least 0.5. |
+| Locked joint "gets an overload abort on T3" | **Corrected.** At home a locked joint has zero demand, so it holds with no sag and passes T3 if run. It never reaches T3, because T0 fails and gates it. |
+| Policy "no feedforward", but a reference-velocity term was present | **Accepted.** The policy is pure feedback on error and speed. The scripted PD is the same law. |
+| Reward units | **Accepted.** Reward is (metric / threshold). Later changed to linear. |
+| Truth equal to the PD level is controller performance, not damage | **Accepted.** Damage truth is the true hypothesis. Reference level is kept separately. |
+| Budget versus clip: weak motors saturate between 0.4 and 0.5 of rated torque | **Kept by design.** A weak motor saturates before the overload limit. |
+| T3 measures kp × gravity; compensation would hide stiffness loss | **Accepted as a limit.** See [robotics-limitations.md](robotics-limitations.md), section 3. |
+| gravity_nm is one number at one hold pose | **Accepted as a limit.** |
+| Friction is missing | **Accepted as a limit.** Future work. |
+| No latency; velocity from a differenced encoder | **Accepted as a limit.** |
+| Weak motor is a hard clip; a demagnetised motor draws more current | **Accepted as a limit.** |
+| Abort must mean drive disable and brake | **Accepted as a hardware precondition.** |
+| Sign-flipped encoder | **Accepted as a hardware precondition.** |
+| "Penalised" over-budget requests are not limits | **Accepted.** Gains are hard-clamped. Overload is a hard abort. |
+| Weak elbow and wrists are not separable | **Accepted as a finding.** |
+| Locked against a sluggish policy | **Accepted as a known confusion.** |
+| Noise counted twice | **Clarified.** Input noise and reading noise are separate sources. |
+| ES is overkill for two parameters; use a grid | **Partly rejected.** ES stays, because RL is the goal. A grid search remains a planned check (not built). |
+| No test that the policy cannot see the fault | **Accepted.** `test_the_controller_only_sees_error_and_speed`. |
+| No test for locked on learned gains | **Accepted.** Locked joints fail T0, which gates the learned skills. |
+| Gate of 20 rollouts is too noisy | **Accepted.** 100 gate runs with a Wilson bound. |
+| Are model-table rollouts randomised? | **Decided: yes.** |
+| Identifiability threshold, so "not forced" can fail | **Accepted.** A pair is separable if some tier differs by at least 0.5. |
 
-## 7. Out of stage 1
+## 7. Open questions for the TA
 
-- A whole-arm environment (the joints do not interact yet).
-- An MLP policy and PPO.
-- Friction, backlash, latency, Kt-based weak motors (stage 1b or stage 2).
-- Multi-pose gravity and a compensated-joint stiffness probe.
-- Shared-damage belief (RQ3, second half).
-- Quadruped and humanoid platforms.
+These are listed in [design-decisions.md](design-decisions.md), section 10, with defaults. The four that most change the results are:
 
-## 8. Open questions for the TA
-
-1. Keep the policy linear for the whole project, or move to an MLP after stage 1?
+1. Should the policy class stay linear, or move to an MLP after stage 1?
 2. Is the scripted PD the right reference, or should a stronger search give the best achievable performance?
 3. Is a Wilson lower bound of 0.85 the right gate?
-4. Should T0 also be learned, or stay scripted?
-5. For a real robot with gravity compensation, which probe replaces T3?
+4. For a robot with gravity compensation, which probe replaces T3?
+
+## 8. Next steps
+
+In order of their effect on the results:
+
+1. **Whole-arm dynamics.** Joint coupling is the main structural limit. Without it, chain gating has no physical basis and the planner has little to choose between.
+2. **A sensor-only check** to separate a locked joint from a missing sensor.
+3. **A stiffness probe at several poses** for broken links on lightly loaded joints, and for robots with gravity compensation.
+4. **Friction and latency** in the model, then re-run the gate (see [robotics-limitations.md](robotics-limitations.md)).
+5. **The ES-versus-grid test**, so the trainer's optimum is checked, not assumed.
+6. **A richer policy class** with the stiffness clamp kept, to see whether the T1 policy gap closes.
